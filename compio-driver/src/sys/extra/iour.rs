@@ -5,6 +5,9 @@ use io_uring::squeue::Flags;
 pub(in crate::sys) struct Extra {
     sqe_flags: Flags,
     cqe_flags: u32,
+    /// The second half of a 32-byte CQE.
+    #[cfg(feature = "io-uring-cqe32")]
+    big_cqe: [u64; 2],
     personality: Option<u16>,
 }
 
@@ -15,6 +18,8 @@ impl Extra {
         Self {
             sqe_flags: Flags::empty(),
             cqe_flags: 0,
+            #[cfg(feature = "io-uring-cqe32")]
+            big_cqe: [0; 2],
             personality: None,
         }
     }
@@ -58,6 +63,16 @@ impl Extra {
     pub fn is_notification(&self) -> bool {
         io_uring::cqueue::notif(self.cqe_flags)
     }
+
+    #[cfg(feature = "io-uring-cqe32")]
+    pub fn big_cqe(&self) -> Option<[u64; 2]> {
+        Some(self.big_cqe)
+    }
+
+    #[cfg(not(feature = "io-uring-cqe32"))]
+    pub fn big_cqe(&self) -> Option<[u64; 2]> {
+        None
+    }
 }
 
 #[allow(dead_code)]
@@ -91,6 +106,13 @@ impl crate::sys::Extra {
     pub(crate) fn set_flags(&mut self, flag: u32) {
         if let Some(extra) = self.try_as_iour_mut() {
             extra.cqe_flags = flag;
+        }
+    }
+
+    #[cfg(feature = "io-uring-cqe32")]
+    pub(crate) fn set_big_cqe(&mut self, big_cqe: [u64; 2]) {
+        if let Some(extra) = self.try_as_iour_mut() {
+            extra.big_cqe = big_cqe;
         }
     }
 }
