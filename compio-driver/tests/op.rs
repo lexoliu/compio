@@ -274,7 +274,7 @@ fn read_multi() {
             let mut buf = if let Some(op) = op {
                 op.take_buffer()
             } else {
-                pool.take(extra.buffer_id()?)?
+                pool.take(&extra, *res.as_ref().unwrap_or(&0))?
             };
             if let Some(ref mut buf) = buf {
                 unsafe { buf.advance_to(res?) }
@@ -322,7 +322,7 @@ fn recv_multi() {
                 let mut buf = if let Some(op) = op {
                     op.take_buffer()
                 } else {
-                    pool.take(extra.buffer_id()?)?
+                    pool.take(&extra, *res.as_ref().unwrap_or(&0))?
                 };
                 if let Some(ref mut buf) = buf {
                     unsafe { buf.advance_to(res?) }

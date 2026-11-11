@@ -9,7 +9,7 @@ pub(in crate::sys) struct BufControl {
 }
 
 impl BufControl {
-    pub fn new(bufs: &[Slot]) -> Self {
+    pub fn new(bufs: &[BufPtr]) -> Self {
         assert!(bufs.len() < u16::MAX as _);
         Self {
             queue: bufs.iter().enumerate().map(|(id, _)| id as u16).collect(),

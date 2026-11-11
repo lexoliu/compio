@@ -219,16 +219,11 @@ impl<T: OpCode + TakeBuffer<Buffer = B> + 'static, B: HandleBufferRef> Stream
                         }
                         b
                     } else {
-                        let b = self.buffer_pool.take(extra.buffer_id()?)?;
-                        let res = res?;
-                        if let Some(mut b) = b {
-                            unsafe {
-                                SetLen::advance_to(&mut b, res);
-                                Some(B::from_buffer_ref(b, self.param))
-                            }
-                        } else {
-                            None
-                        }
+                        let len = res.as_ref().map_or(0, |len| *len);
+                        let b = self.buffer_pool.take(&extra, len)?;
+                        res?;
+                        let param = self.param;
+                        b.map(|b| unsafe { B::from_buffer_ref(b, param) })
                     }
                 }
                 None => self
