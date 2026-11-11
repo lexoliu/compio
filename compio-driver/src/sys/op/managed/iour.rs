@@ -13,6 +13,7 @@ use socket2::{SockAddr, SockAddrStorage, socklen_t};
 
 use crate::{
     AsSocketState, BufferPool, BufferRef, Extra, IourOpCode as OpCode, OpEntry,
+    buffer_pool::Filled,
     op::TakeBuffer,
     sys::pal::{is_kernel_at_least, set_poll_first},
 };
@@ -57,15 +58,10 @@ unsafe impl<S: AsFd> OpCode for ReadManagedAt<S> {
             .into()
     }
 
-    unsafe fn set_result(&mut self, _: &mut Self::Control, _: &io::Result<usize>, extra: &Extra) {
-        let Ok(buffer_id) = extra.buffer_id() else {
+    unsafe fn set_result(&mut self, _: &mut Self::Control, res: &io::Result<usize>, extra: &Extra) {
+        let Some(buffer) = take_filled(&self.buffer_pool, res, extra) else {
             return;
         };
-        let buffer = self
-            .buffer_pool
-            .take(buffer_id)
-            .expect("Driver should be alive")
-            .expect("Buffer should not be in use");
         self.buffer.replace(buffer);
     }
 }
@@ -115,15 +111,10 @@ unsafe impl<S: AsFd> OpCode for ReadManaged<S> {
             .into()
     }
 
-    unsafe fn set_result(&mut self, _: &mut Self::Control, _: &io::Result<usize>, extra: &Extra) {
-        let Ok(buffer_id) = extra.buffer_id() else {
+    unsafe fn set_result(&mut self, _: &mut Self::Control, res: &io::Result<usize>, extra: &Extra) {
+        let Some(buffer) = take_filled(&self.buffer_pool, res, extra) else {
             return;
         };
-        let buffer = self
-            .buffer_pool
-            .take(buffer_id)
-            .expect("Driver should be alive")
-            .expect("Buffer should not be in use");
         self.buffer.replace(buffer);
     }
 }
@@ -176,15 +167,10 @@ unsafe impl<S: AsSocketState> OpCode for RecvManaged<S> {
         entry.into()
     }
 
-    unsafe fn set_result(&mut self, _: &mut Self::Control, _: &io::Result<usize>, extra: &Extra) {
-        let Ok(buffer_id) = extra.buffer_id() else {
+    unsafe fn set_result(&mut self, _: &mut Self::Control, res: &io::Result<usize>, extra: &Extra) {
+        let Some(buffer) = take_filled(&self.buffer_pool, res, extra) else {
             return;
         };
-        let buffer = self
-            .buffer_pool
-            .take(buffer_id)
-            .expect("Driver should be alive")
-            .expect("Buffer should not be in use");
         self.buffer.replace(buffer);
     }
 }
@@ -276,18 +262,13 @@ unsafe impl<S: AsSocketState> OpCode for RecvFromManaged<S> {
     unsafe fn set_result(
         &mut self,
         control: &mut Self::Control,
-        _: &io::Result<usize>,
+        res: &io::Result<usize>,
         extra: &Extra,
     ) {
         self.name_len = control.msg.msg_namelen;
-        let Ok(buffer_id) = extra.buffer_id() else {
+        let Some(buffer) = take_filled(&self.buffer_pool, res, extra) else {
             return;
         };
-        let buffer = self
-            .buffer_pool
-            .take(buffer_id)
-            .expect("Driver should be alive")
-            .expect("Buffer should not be in use");
         self.buffer.replace(buffer);
     }
 }
@@ -359,9 +340,21 @@ impl<C: IoBufMut, S: AsFd> TakeBuffer for RecvMsgManaged<C, S> {
     }
 }
 
+/// Take the buffer of the pool a completion filled, if it names one.
+fn take_filled(pool: &BufferPool, res: &io::Result<usize>, extra: &Extra) -> Option<BufferRef> {
+    extra.buffer_id().ok()?;
+    let len = res.as_ref().map_or(0, |len| *len);
+    let buffer = pool
+        .take(extra, len)
+        .expect("Driver should be alive")
+        .expect("Buffer should not be in use");
+    Some(buffer)
+}
+
+/// Gives back the buffer of a completion nobody took.
 struct BufferGuard {
     pool: BufferPool,
-    buffer_id: u16,
+    filled: Filled,
 }
 
 impl BufferGuard {
@@ -375,7 +368,7 @@ impl BufferGuard {
 
 impl Drop for BufferGuard {
     fn drop(&mut self) {
-        _ = self.pool.reset(self.buffer_id);
+        _ = self.pool.reset_filled(self.filled);
     }
 }
 
@@ -387,9 +380,10 @@ struct MultishotResult {
 
 impl MultishotResult {
     pub fn new(result: io::Result<usize>, extra: Extra, pool: &BufferPool) -> Self {
-        let guard = extra.buffer_id().ok().map(|buffer_id| BufferGuard {
+        let len = result.as_ref().map_or(0, |len| *len);
+        let guard = Filled::new(&extra, len).ok().map(|filled| BufferGuard {
             pool: pool.clone(),
-            buffer_id,
+            filled,
         });
         Self {
             result,
@@ -785,14 +779,9 @@ unsafe impl<S: AsFd> OpCode for RecvMsgMultiImpl<S> {
         result: &io::Result<usize>,
         extra: &Extra,
     ) {
-        let Ok(buffer_id) = extra.buffer_id() else {
+        let Some(buffer) = take_filled(&self.buffer_pool, result, extra) else {
             return;
         };
-        let buffer = self
-            .buffer_pool
-            .take(buffer_id)
-            .expect("Driver should be alive")
-            .expect("Buffer should not be in use");
         self.buffer.replace(buffer);
         if let Ok(result) = result {
             self.len = *result;

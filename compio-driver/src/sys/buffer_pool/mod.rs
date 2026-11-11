@@ -31,7 +31,7 @@ impl Debug for BufControl {
 impl BufControl {
     pub(crate) unsafe fn new(
         driver: &mut super::Driver,
-        bufs: &[Slot],
+        bufs: &[BufPtr],
         buf_len: u32,
         flags: u16,
     ) -> io::Result<BufControl> {
@@ -68,5 +68,13 @@ impl BufControl {
     #[cfg(fusion)]
     pub fn is_io_uring(&self) -> bool {
         self.0.is_io_uring()
+    }
+
+    /// Test if the kernel consumes the buffers incrementally.
+    pub fn is_incremental(&self) -> bool {
+        cfg_select! {
+            io_uring => self.0.is_incremental(),
+            _ => false,
+        }
     }
 }

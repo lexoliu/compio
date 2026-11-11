@@ -6,14 +6,11 @@ use std::{
     sync::atomic::Ordering,
 };
 
-use io_uring::types::BufRingEntry;
+use io_uring::types::{BufRingEntry, IOU_PBUF_RING_INC};
 use rustix::mm::{MapFlags, ProtFlags, mmap_anonymous, munmap};
 use synchrony::unsync::atomic::AtomicU16;
 
-use crate::{
-    assert_not_impl,
-    buffer_pool::{BufPtr, Slot},
-};
+use crate::{assert_not_impl, buffer_pool::BufPtr};
 
 #[derive(Debug)]
 pub(in crate::sys) struct BufControl {
@@ -23,6 +20,8 @@ pub(in crate::sys) struct BufControl {
     len: NonZeroU16,
     /// Total size of the mmap
     size: usize,
+    /// The ring is registered with `IOU_PBUF_RING_INC`
+    incremental: bool,
 }
 
 assert_not_impl!(BufControl, Send);
@@ -38,9 +37,13 @@ impl BufControl {
     /// - be available throughout the lifetime of this control, and
     /// - not be used (read or write) until a `buffer_id` is returned from
     ///   kernel and the corresponding buffer is taken from `BufferPool`.
+    ///
+    /// A kernel that predates `IOU_PBUF_RING_INC` (before Linux 6.12) rejects
+    /// it with `EINVAL`; the ring is then registered without it, and consumes
+    /// whole buffers.
     pub unsafe fn new(
         driver: &mut crate::Driver,
-        bufs: &[Slot],
+        bufs: &[BufPtr],
         bufs_len: u32,
         flags: u16,
     ) -> io::Result<Self> {
@@ -57,21 +60,39 @@ impl BufControl {
             .expect("mmap failed")
             .cast::<BufRingEntry>();
 
-        let mut this = Self { ptr, len, size };
-
-        unsafe {
+        let mut register = |flags| unsafe {
             driver.inner().submitter().register_buf_ring_with_flags(
                 ptr.addr().get() as u64,
                 len.get(),
                 Self::BUF_GROUP,
                 flags,
             )
-        }?;
+        };
+        let inc = IOU_PBUF_RING_INC as u16;
+        let registered = match register(flags) {
+            Err(e) if flags & inc != 0 && e.raw_os_error() == Some(libc::EINVAL) => {
+                register(flags & !inc).map(|()| false)
+            }
+            res => res.map(|()| flags & inc != 0),
+        };
+        let incremental = match registered {
+            Ok(incremental) => incremental,
+            Err(e) => {
+                unsafe { munmap(ptr.cast().as_ptr(), size) }?;
+                return Err(e);
+            }
+        };
 
-        for (id, buf) in bufs.iter().enumerate() {
-            let ptr = buf.expect("Cannot initialize with null bufs");
+        let mut this = Self {
+            ptr,
+            len,
+            size,
+            incremental,
+        };
+
+        for (id, ptr) in bufs.iter().enumerate() {
             let id = id as u16;
-            unsafe { this.add_buffer(id, ptr, bufs_len, id) };
+            unsafe { this.add_buffer(id, *ptr, bufs_len, id) };
         }
         // SAFETY: Entries were initialized just now
         unsafe { this.commit(bufs.len() as _) };
@@ -89,6 +110,11 @@ impl BufControl {
     /// Get the buffer group id
     pub const fn buffer_group(&self) -> u16 {
         Self::BUF_GROUP
+    }
+
+    /// Whether the kernel consumes the buffers incrementally
+    pub const fn is_incremental(&self) -> bool {
+        self.incremental
     }
 
     /// Reset the buffer and make it available to the kernel

@@ -1,7 +1,7 @@
 use std::io;
 
 use super::{fallback, iour};
-use crate::buffer_pool::{BufPtr, Slot};
+use crate::buffer_pool::BufPtr;
 
 #[repr(transparent)]
 #[derive(Debug)]
@@ -18,7 +18,7 @@ enum Inner {
 impl BufControl {
     pub unsafe fn new(
         driver: &mut crate::Driver,
-        bufs: &[Slot],
+        bufs: &[BufPtr],
         bufs_len: u32,
         flags: u16,
     ) -> io::Result<Self> {
@@ -63,5 +63,12 @@ impl BufControl {
 
     pub fn is_io_uring(&self) -> bool {
         matches!(self.inner, Inner::IoUring(_))
+    }
+
+    pub fn is_incremental(&self) -> bool {
+        match &self.inner {
+            Inner::IoUring(buf_control) => buf_control.is_incremental(),
+            Inner::Fallback(_) => false,
+        }
     }
 }

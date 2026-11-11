@@ -2,7 +2,7 @@ use std::{
     cell::UnsafeCell,
     fmt::Debug,
     io,
-    mem::{self, MaybeUninit},
+    mem::MaybeUninit,
     ops::{Deref, DerefMut},
     ptr::{self, NonNull},
     rc::{Rc, Weak},
@@ -11,7 +11,7 @@ use std::{
 
 use compio_buf::{IoBuf, IoBufMut, SetLen};
 
-use crate::sys::BufControl;
+use crate::{Extra, sys::BufControl};
 
 /// Trait used to allocate buffers for compio-driver's buffer pool.
 ///
@@ -64,10 +64,6 @@ impl BufferAlloc {
 
 /// A buffer pointer without length part.
 pub(crate) type BufPtr = NonNull<MaybeUninit<u8>>;
-/// A buffer slot. It's always 1-pointer sized thanks to niche optimization.
-pub(crate) type Slot = Option<BufPtr>;
-
-const _: () = assert!(size_of::<Slot>() == size_of::<usize>());
 
 /// A buffer pool.
 ///
@@ -83,27 +79,55 @@ pub(crate) struct BufferPoolRoot {
     shared: Rc<Shared>,
 }
 
-/// A unique reference to a buffer within the buffer pool.
+/// A reference to the bytes of a buffer within the buffer pool.
 ///
 /// Dropping this type will reset the buffer back to the pool instead of
 /// releasing buffer's memory.
-#[derive(Debug)]
+///
+/// On a pool that consumes its buffers incrementally (see
+/// [`BufferPool::is_incremental`]), several references can point into one
+/// buffer, each to the part one completion filled. The buffer goes back to the
+/// pool once the kernel has finished with it and the last of them is dropped.
 pub struct BufferRef {
-    /// Allocator to deallocate the buffer in case the driver is dropped.
-    alloc: BufferAlloc,
     /// Initialized length of the buffer, set with [`SetLen`]
     len: u32,
     /// User-set capacity, default to `full_cap`
     cap: u32,
-    /// Full capacity of the buffer, used to release memory if driver (buffer
-    /// pool) is dropped
+    /// Full capacity of this reference: the whole buffer, or the part of it
+    /// one completion filled on an incremental pool
     full_cap: u32,
-    /// Weak handle of the buffer pool
-    shared: Weak<Shared>,
-    /// Pointer of the buffer
+    /// The buffer pool, kept alive until the last reference into it is
+    /// dropped, so that a buffer still referenced when the driver is dropped
+    /// is deallocated then
+    shared: Rc<Shared>,
+    /// Pointer to the first byte of this reference
     ptr: BufPtr,
     /// Buffer id (index within the Vec)
     buffer_id: u16,
+}
+
+/// What a completion did with a buffer of the pool.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Filled {
+    buffer_id: u16,
+    /// Bytes the completion wrote into it
+    len: u32,
+    /// The kernel keeps the buffer for more completions
+    /// (`IORING_CQE_F_BUF_MORE`)
+    more: bool,
+}
+
+impl Filled {
+    /// The buffer of a completion that wrote `len` bytes, described by
+    /// `extra`.
+    pub(crate) fn new(extra: &Extra, len: usize) -> io::Result<Self> {
+        Ok(Self {
+            buffer_id: extra.buffer_id()?,
+            // A completion's result is an `i32`.
+            len: len as u32,
+            more: extra.buffer_more()?,
+        })
+    }
 }
 
 #[repr(transparent)]
@@ -121,8 +145,25 @@ struct Inner {
     /// Size of each buffer
     size: u32,
 
-    /// Buffer pointers
-    bufs: Vec<Slot>,
+    /// Buffers, indexed by buffer id
+    bufs: Vec<Buffer>,
+
+    /// The control block is released: a buffer still referenced is
+    /// deallocated when its last reference is dropped
+    released: bool,
+}
+
+struct Buffer {
+    ptr: BufPtr,
+    /// The buffer is in the control block's ring: free for the kernel to fill,
+    /// or, on an incremental pool, partly filled and kept by the kernel for
+    /// more completions
+    in_ring: bool,
+    /// Bytes filled since the buffer was last put in the ring: where the next
+    /// completion into it begins on an incremental pool
+    filled: u32,
+    /// Live [`BufferRef`]s into the buffer
+    refs: u32,
 }
 
 impl BufferPoolRoot {
@@ -139,10 +180,29 @@ impl BufferPoolRoot {
                 "Buffer size too large. Should be able to fit into u32.",
             )
         })?;
-        let bufs = (0..num_of_bufs.next_power_of_two())
-            .map(|_| Some((alloc.allocate)(size)))
+        let ptrs = (0..num_of_bufs.next_power_of_two())
+            .map(|_| (alloc.allocate)(size))
             .collect::<Vec<_>>();
-        let ctrl = unsafe { BufControl::new(driver, &bufs, size, flags) }?;
+        let ctrl = match unsafe { BufControl::new(driver, &ptrs, size, flags) } {
+            Ok(ctrl) => ctrl,
+            Err(e) => {
+                for ptr in ptrs {
+                    // SAFETY: The control block was not created, so nothing
+                    // else refers to the buffers
+                    unsafe { (alloc.deallocate)(ptr, size) }
+                }
+                return Err(e);
+            }
+        };
+        let bufs = ptrs
+            .into_iter()
+            .map(|ptr| Buffer {
+                ptr,
+                in_ring: true,
+                filled: 0,
+                refs: 0,
+            })
+            .collect();
 
         Ok(Self {
             shared: Shared {
@@ -151,6 +211,7 @@ impl BufferPoolRoot {
                     ctrl,
                     size,
                     bufs,
+                    released: false,
                 }
                 .into(),
             }
@@ -162,8 +223,8 @@ impl BufferPoolRoot {
     ///
     /// If the buffer pool root is dropped without calling this function,
     /// everything will be leaked and there will be no chance to recover them
-    /// back, except those have been taken by [`BufferRef`], which will be
-    /// released when they're dropped.
+    /// back, except those referenced by [`BufferRef`], which will be released
+    /// when the last reference to each is dropped.
     ///
     /// If the control block failed to release, this function will return an io
     /// Error without deallocating buffers, and it's possible to retry.
@@ -177,9 +238,14 @@ impl BufferPoolRoot {
         unsafe {
             self.shared.with(|inner| {
                 inner.ctrl.release(driver)?;
-                for buf in mem::take(&mut inner.bufs).into_iter().flatten() {
-                    // Control is successfully released, now deallocate buffers
-                    (inner.alloc.deallocate)(buf, inner.size)
+                // Control is successfully released, now deallocate the buffers
+                // nothing refers to
+                inner.released = true;
+                for buf in &mut inner.bufs {
+                    buf.in_ring = false;
+                    if buf.refs == 0 {
+                        (inner.alloc.deallocate)(buf.ptr, inner.size)
+                    }
                 }
                 io::Result::Ok(())
             })
@@ -192,10 +258,6 @@ impl BufferPoolRoot {
         BufferPool {
             shared: Rc::downgrade(&self.shared),
         }
-    }
-
-    pub(crate) fn is_unique(&self) -> bool {
-        Rc::strong_count(&self.shared) == 1
     }
 }
 
@@ -213,39 +275,26 @@ impl Debug for BufferPool {
     }
 }
 
+impl Debug for Buffer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Buf")
+            .field("ptr", &self.ptr)
+            .field("in_ring", &self.in_ring)
+            .field("filled", &self.filled)
+            .field("refs", &self.refs)
+            .finish()
+    }
+}
+
 impl Debug for Shared {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        struct Buf {
-            ptr: BufPtr,
-        }
-
-        impl Debug for Buf {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(f, "Buf<{:p}>", self.ptr)
-            }
-        }
-
-        struct BuffersDebug<'a> {
-            buffers: &'a [Slot],
-        }
-
-        impl Debug for BuffersDebug<'_> {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.debug_list()
-                    .entries(self.buffers.iter().map(|buf| buf.map(|ptr| Buf { ptr })))
-                    .finish()
-            }
-        }
-
         unsafe {
             self.with(|inner| {
-                let buffers = BuffersDebug {
-                    buffers: &inner.bufs,
-                };
                 f.debug_struct("Shared")
                     .field("control", &inner.ctrl)
                     .field("size", &inner.size)
-                    .field("buffers", &buffers)
+                    .field("buffers", &inner.bufs)
+                    .field("released", &inner.released)
                     .finish()
             })
         }
@@ -260,48 +309,64 @@ impl BufferPool {
     ///
     /// [`Unsupported`]: io::ErrorKind::Unsupported
     pub fn pop(&self) -> io::Result<BufferRef> {
-        let buffer_id = unsafe { self.with(|inner| inner.ctrl.pop()) }??;
+        let shared = self.shared()?;
+        let buffer_id = unsafe { shared.with(|inner| inner.ctrl.pop()) }?;
 
-        Ok(self.take(buffer_id)?.expect("Buffer should be available"))
+        Ok(Shared::lend(&shared, buffer_id, None).expect("Buffer should be available"))
     }
 
-    /// Take the indicated buffer from the pool.
+    /// Take the buffer a completion wrote `len` bytes into, which `extra`
+    /// identifies.
     ///
-    /// Returns `None` if the buffer is not reset back yet or does not exist.
-    pub fn take(&self, buffer_id: u16) -> io::Result<Option<BufferRef>> {
-        let shared = self.shared()?;
-        let Some(ptr) = shared.take(buffer_id) else {
-            return Ok(None);
-        };
-        let cap = shared.len();
-
-        Ok(Some(BufferRef {
-            alloc: shared.alloc(),
-            len: 0,
-            cap,
-            full_cap: cap,
-            shared: Rc::downgrade(&shared),
-            ptr,
-            buffer_id,
-        }))
+    /// The returned buffer holds those `len` bytes. On a pool that consumes its
+    /// buffers incrementally (see [`is_incremental`]), it refers only to the
+    /// part of the buffer this completion filled, and the buffer goes back to
+    /// the pool once the kernel has finished with it and every reference into
+    /// it is dropped.
+    ///
+    /// Returns `None` if the buffer is not in the pool's ring (it was not
+    /// reset back yet), or does not exist.
+    ///
+    /// [`is_incremental`]: Self::is_incremental
+    pub fn take(&self, extra: &Extra, len: usize) -> io::Result<Option<BufferRef>> {
+        self.take_filled(Filled::new(extra, len)?)
     }
 
-    /// Reset the `buffer_id` so that it's available for kernel to use, return
-    /// whether a buffer has been reset.
-    ///
-    /// This is the same as `take(buffer_id)` and immediately drop it.
-    pub fn reset(&self, buffer_id: u16) -> io::Result<bool> {
+    pub(crate) fn take_filled(&self, filled: Filled) -> io::Result<Option<BufferRef>> {
         let shared = self.shared()?;
-        let Some(buf) = shared.take(buffer_id) else {
-            return Ok(false);
-        };
-        shared.reset(buffer_id, buf);
-        Ok(true)
+        Ok(Shared::lend(&shared, filled.buffer_id, Some(filled)))
+    }
+
+    /// Reset the buffer a completion wrote `len` bytes into, which `extra`
+    /// identifies, so that it's available for kernel to use once the kernel
+    /// has finished with it. Returns whether such a buffer was in the ring.
+    ///
+    /// This is the same as `take(extra, len)` and immediately drop it.
+    pub fn reset(&self, extra: &Extra, len: usize) -> io::Result<bool> {
+        self.reset_filled(Filled::new(extra, len)?)
+    }
+
+    pub(crate) fn reset_filled(&self, filled: Filled) -> io::Result<bool> {
+        Ok(self.take_filled(filled)?.is_some())
+    }
+
+    /// Test if the pool consumes its buffers incrementally.
+    ///
+    /// This is the case for a pool on io_uring whose flags (see
+    /// [`ProactorBuilder::buffer_pool_flag`]) include `IOU_PBUF_RING_INC` and
+    /// whose kernel accepted it (Linux 6.12). A completion then fills only
+    /// the part of a buffer it needs, and the next one continues in it.
+    ///
+    /// [`ProactorBuilder::buffer_pool_flag`]: crate::ProactorBuilder::buffer_pool_flag
+    pub fn is_incremental(&self) -> io::Result<bool> {
+        unsafe { self.with(|inner| inner.ctrl.is_incremental()) }
     }
 
     fn shared(&self) -> io::Result<Rc<Shared>> {
         self.shared
             .upgrade()
+            // A buffer referenced past the driver's drop keeps the pool alive
+            .filter(|shared| unsafe { !shared.with(|inner| inner.released) })
             .ok_or_else(|| io::Error::other("The driver has been dropped"))
     }
 
@@ -340,30 +405,76 @@ impl Shared {
         f(unsafe { &mut *self.inner.get() })
     }
 
-    fn alloc(&self) -> BufferAlloc {
-        unsafe { self.with(|inner| inner.alloc) }
+    /// Lend buffer `buffer_id` out of the ring: the part `filled` wrote on an
+    /// incremental pool, the whole buffer otherwise.
+    fn lend(this: &Rc<Self>, buffer_id: u16, filled: Option<Filled>) -> Option<BufferRef> {
+        let (ptr, cap, len) = unsafe { this.with(|inner| inner.lend(buffer_id, filled)) }?;
+        Some(BufferRef {
+            len,
+            cap,
+            full_cap: cap,
+            shared: this.clone(),
+            ptr,
+            buffer_id,
+        })
     }
+}
 
-    fn take(&self, buffer_id: u16) -> Option<BufPtr> {
-        unsafe { self.with(|inner| inner.bufs.get_mut(buffer_id as usize)?.take()) }
-    }
-
-    fn reset(&self, buffer_id: u16, ptr: BufPtr) {
-        unsafe {
-            self.with(|inner| {
-                // This method might be called after `BufferPoolRoot::release`.
-                if let Some(slot) = inner.bufs.get_mut(buffer_id as usize) {
-                    *slot = Some(ptr);
-                    inner.ctrl.reset(buffer_id, ptr, inner.size);
-                } else {
-                    (inner.alloc.deallocate)(ptr, inner.size);
+impl Inner {
+    /// Returns where the reference begins, its capacity and its initialized
+    /// length.
+    fn lend(&mut self, buffer_id: u16, filled: Option<Filled>) -> Option<(BufPtr, u32, u32)> {
+        let incremental = self.ctrl.is_incremental();
+        let size = self.size;
+        let buf = self.bufs.get_mut(buffer_id as usize)?;
+        if !buf.in_ring {
+            return None;
+        }
+        buf.refs += 1;
+        match filled {
+            Some(Filled { len, more, .. }) if incremental => {
+                let start = buf.filled;
+                debug_assert!(
+                    len <= size - start,
+                    "a completion filled past the end of buffer {buffer_id}"
+                );
+                buf.filled += len;
+                // The kernel gives a buffer up when a completion fills it to
+                // the end, and posts that completion without
+                // `IORING_CQE_F_BUF_MORE`. A completion that wrote nothing
+                // leaves the buffer in the ring whatever its flags say
+                // (`io_kbuf_inc_commit` in io_uring/kbuf.c).
+                if !more && len > 0 {
+                    buf.in_ring = false;
                 }
-            })
+                // SAFETY: `start + len` is within the buffer
+                Some((unsafe { buf.ptr.add(start as usize) }, len, len))
+            }
+            filled => {
+                buf.in_ring = false;
+                Some((buf.ptr, size, filled.map_or(0, |filled| filled.len)))
+            }
         }
     }
 
-    fn len(&self) -> u32 {
-        unsafe { self.with(|inner| inner.size) }
+    /// Drop a reference into buffer `buffer_id`, giving the buffer back to the
+    /// ring once the kernel is done with it and nothing refers to it.
+    fn release_ref(&mut self, buffer_id: u16) {
+        let buf = &mut self.bufs[buffer_id as usize];
+        buf.refs -= 1;
+        if buf.refs > 0 || buf.in_ring {
+            return;
+        }
+        if self.released {
+            // SAFETY: The control block is released and nothing refers to the
+            // buffer
+            unsafe { (self.alloc.deallocate)(buf.ptr, self.size) }
+        } else {
+            buf.in_ring = true;
+            buf.filled = 0;
+            // SAFETY: The buffer lives until the pool is released
+            unsafe { self.ctrl.reset(buffer_id, buf.ptr, self.size) };
+        }
     }
 }
 
@@ -387,6 +498,18 @@ impl BufferRef {
         }
         self.cap = (cap as u32).min(self.full_cap);
         self.len = self.len.min(self.cap);
+    }
+}
+
+impl Debug for BufferRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BufferRef")
+            .field("buffer_id", &self.buffer_id)
+            .field("ptr", &self.ptr)
+            .field("len", &self.len)
+            .field("cap", &self.cap)
+            .field("full_cap", &self.full_cap)
+            .finish_non_exhaustive()
     }
 }
 
@@ -421,20 +544,16 @@ impl SetLen for BufferRef {
 
 impl IoBufMut for BufferRef {
     unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
-        // SAFETY: Cap is initialized as the buffer length, and setting it is
-        // is capped at full_cap, so it will never exceed buffer length. Pointer
-        // is not deallocated.
+        // SAFETY: Cap is initialized as the length of this reference, and
+        // setting it is capped at full_cap, so it will never exceed it, nor
+        // reach into another reference to the same buffer. Pointer is not
+        // deallocated.
         unsafe { slice::from_raw_parts_mut(self.ptr.as_ptr(), self.cap as usize) }
     }
 }
 
 impl Drop for BufferRef {
     fn drop(&mut self) {
-        if let Some(shared) = self.shared.upgrade() {
-            // If the buffer pool is alive, set the pointer back
-            shared.reset(self.buffer_id, self.ptr);
-        } else {
-            unsafe { (self.alloc.deallocate)(self.ptr, self.full_cap) }
-        }
+        unsafe { self.shared.with(|inner| inner.release_ref(self.buffer_id)) }
     }
 }

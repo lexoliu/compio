@@ -142,7 +142,6 @@ impl Drop for Proactor {
         let BufferPoolState::Init(buffer_pool) = &mut self.buffer_pool else {
             return;
         };
-        debug_assert!(buffer_pool.is_unique()); // Just in case. Shouldn't happen
         _ = unsafe { buffer_pool.release(&mut self.driver) };
     }
 }
@@ -806,6 +805,12 @@ impl ProactorBuilder {
     /// Flag to be used to initialize buffer pool.
     ///
     /// This is only supported on io-uring driver.
+    ///
+    /// With `IOU_PBUF_RING_INC`, the kernel consumes the buffers
+    /// incrementally: a completion fills only the part of a buffer it needs,
+    /// and the next one continues in it. A kernel before Linux 6.12 rejects the
+    /// flag, and the pool is then registered without it;
+    /// [`BufferPool::is_incremental`] tells which.
     ///
     /// Default to be `0`.
     pub fn buffer_pool_flag(&mut self, flag: u16) -> &mut Self {
