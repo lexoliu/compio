@@ -12,25 +12,13 @@ use std::{
 
 use compio_buf::BufResult;
 use compio_driver::{
-    AsFd, AsRawFd, AsSocketState, BorrowedFd, BufferPool, BufferRef, OpCode, Proactor,
-    ProactorBuilder, PushEntry, ResultTakeBuffer, SharedFd, op::RecvManaged,
+    AsRawFd, BufferPool, BufferRef, OpCode, Proactor, ProactorBuilder, PushEntry, ResultTakeBuffer,
+    SharedFd, op::RecvManaged,
 };
 use io_uring::types::IOU_PBUF_RING_INC;
 use rustix::net::RecvFlags;
 
 const BUFFER_LEN: usize = 4096;
-
-/// A plain fd has no per-socket readiness state, so it is wrapped to satisfy
-/// [AsSocketState].
-struct Socket(UnixStream);
-
-impl AsFd for Socket {
-    fn as_fd(&self) -> BorrowedFd<'_> {
-        self.0.as_fd()
-    }
-}
-
-impl AsSocketState for Socket {}
 
 fn push_and_wait<O: OpCode + 'static>(driver: &mut Proactor, op: O) -> BufResult<usize, O> {
     match driver.push(op) {
@@ -48,7 +36,7 @@ fn push_and_wait<O: OpCode + 'static>(driver: &mut Proactor, op: O) -> BufResult
 struct Setup {
     driver: Proactor,
     pool: BufferPool,
-    rx: SharedFd<Socket>,
+    rx: SharedFd<UnixStream>,
     tx: UnixStream,
 }
 
@@ -71,7 +59,7 @@ fn setup() -> Option<Setup> {
         return None;
     }
     let (rx, tx) = UnixStream::pair().unwrap();
-    let rx = SharedFd::new(Socket(rx));
+    let rx = SharedFd::new(rx);
     driver.attach(rx.as_raw_fd()).unwrap();
     Some(Setup {
         driver,
