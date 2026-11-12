@@ -1,9 +1,9 @@
 use std::{
     collections::VecDeque,
     io,
-    mem::{ManuallyDrop, size_of},
+    mem::size_of,
     os::fd::{AsFd, AsRawFd},
-    ptr::{self, drop_in_place},
+    ptr,
 };
 
 use compio_buf::{BufResult, IntoInner, IoBuf, IoBufMut, SetLenExt};
@@ -341,61 +341,37 @@ impl<C: IoBufMut, S: AsFd> TakeBuffer for RecvMsgManaged<C, S> {
 }
 
 /// Take the buffer of the pool a completion filled, if it names one.
+///
+/// Called when the driver hands the completion to its op, in the order the
+/// kernel posted the completions, which is the order an incremental pool
+/// fills a buffer in.
 fn take_filled(pool: &BufferPool, res: &io::Result<usize>, extra: &Extra) -> Option<BufferRef> {
-    extra.buffer_id().ok()?;
     let len = res.as_ref().map_or(0, |len| *len);
+    let filled = Filled::new(extra, len).ok()?;
     let buffer = pool
-        .take(extra, len)
+        .take_filled(filled)
         .expect("Driver should be alive")
         .expect("Buffer should not be in use");
     Some(buffer)
 }
 
-/// Gives back the buffer of a completion nobody took.
-struct BufferGuard {
-    pool: BufferPool,
-    filled: Filled,
-}
-
-impl BufferGuard {
-    pub fn leak(self) {
-        let mut this = ManuallyDrop::new(self);
-        // SAFETY: we're taking ownership of self, so this function will be
-        // executed at most once
-        unsafe { drop_in_place(&raw mut this.pool) }
-    }
-}
-
-impl Drop for BufferGuard {
-    fn drop(&mut self) {
-        _ = self.pool.reset_filled(self.filled);
-    }
-}
-
+/// A multishot completion queued for the op's consumer, carrying the buffer
+/// it filled in its [`Extra`] (see [`BufferPool::take`]). Dropping it gives
+/// the buffer back.
 struct MultishotResult {
     result: io::Result<usize>,
     extra: Extra,
-    guard: Option<BufferGuard>,
 }
 
 impl MultishotResult {
-    pub fn new(result: io::Result<usize>, extra: Extra, pool: &BufferPool) -> Self {
-        let len = result.as_ref().map_or(0, |len| *len);
-        let guard = Filled::new(&extra, len).ok().map(|filled| BufferGuard {
-            pool: pool.clone(),
-            filled,
-        });
-        Self {
-            result,
-            extra,
-            guard,
+    pub fn new(result: io::Result<usize>, mut extra: Extra, pool: &BufferPool) -> Self {
+        if let Some(buffer) = take_filled(pool, &result, &extra) {
+            extra.set_lent_buffer(buffer);
         }
+        Self { result, extra }
     }
 
-    pub fn into_result(mut self) -> BufResult<usize, Extra> {
-        if let Some(guard) = self.guard.take() {
-            guard.leak();
-        };
+    pub fn into_result(self) -> BufResult<usize, Extra> {
         BufResult(self.result, self.extra)
     }
 }

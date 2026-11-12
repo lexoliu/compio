@@ -207,7 +207,7 @@ impl<T: OpCode + TakeBuffer<Buffer = B> + 'static, B: HandleBufferRef> Stream
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         if let Some(inner) = self.inner.as_mut() {
             let buffer = match std::task::ready!(inner.poll_next_unpin(cx)) {
-                Some(BufResult(res, extra)) => {
+                Some(BufResult(res, mut extra)) => {
                     if inner.is_terminated() {
                         let mut b = self
                             .inner
@@ -221,7 +221,7 @@ impl<T: OpCode + TakeBuffer<Buffer = B> + 'static, B: HandleBufferRef> Stream
                         b
                     } else {
                         let len = res.as_ref().map_or(0, |len| *len);
-                        let b = self.buffer_pool.take(&extra, len)?;
+                        let b = self.buffer_pool.take(&mut extra, len)?;
                         res?;
                         let param = self.param;
                         b.map(|b| unsafe { B::from_buffer_ref(b, param) })

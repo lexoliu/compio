@@ -10,6 +10,10 @@ pub(in crate::sys) struct Extra {
     /// Slot of this op inside the `in_flight` map of the `io_uring` driver,
     /// set while the op is in flight.
     in_flight: Option<DefaultKey>,
+    /// The buffer of the pool a multishot completion filled, lent out when the
+    /// driver handed the completion to its op, until it is taken with
+    /// [`BufferPool::take`](crate::BufferPool::take).
+    lent_buffer: Option<crate::BufferRef>,
 }
 
 pub(in crate::sys) use Extra as IourExtra;
@@ -21,6 +25,7 @@ impl Extra {
             cqe_flags: 0,
             personality: None,
             in_flight: None,
+            lent_buffer: None,
         }
     }
 
@@ -106,5 +111,15 @@ impl crate::sys::Extra {
         if let Some(extra) = self.try_as_iour_mut() {
             extra.cqe_flags = flag;
         }
+    }
+
+    pub(crate) fn set_lent_buffer(&mut self, buffer: crate::BufferRef) {
+        if let Some(extra) = self.try_as_iour_mut() {
+            extra.lent_buffer = Some(buffer);
+        }
+    }
+
+    pub(crate) fn take_lent_buffer(&mut self) -> Option<crate::BufferRef> {
+        self.try_as_iour_mut()?.lent_buffer.take()
     }
 }
