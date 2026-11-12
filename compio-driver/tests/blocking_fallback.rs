@@ -8,14 +8,14 @@ use std::{
     ffi::CString,
     net::{TcpListener, TcpStream},
     os::{
-        fd::{AsFd, AsRawFd, BorrowedFd},
+        fd::{AsFd, AsRawFd},
         unix::fs::MetadataExt,
     },
 };
 
 use compio_buf::{BufResult, IntoInner};
 use compio_driver::{
-    AsSocketState, DriverType, OpCode, Proactor, PushEntry,
+    DriverType, OpCode, Proactor, PushEntry,
     op::{Accept, AcceptMulti, CreateSocket, CurrentDir, Mode, OFlags, OpenFile},
 };
 
@@ -73,18 +73,6 @@ unsafe impl<T: compio_driver::PollOpCode> compio_driver::PollOpCode for ForceBlo
         unsafe { self.0.set_result(ctrl, res, extra) }
     }
 }
-
-/// A plain listener has no per-socket readiness state, so it is wrapped to
-/// satisfy [`AsSocketState`].
-struct Listener(TcpListener);
-
-impl AsFd for Listener {
-    fn as_fd(&self) -> BorrowedFd<'_> {
-        self.0.as_fd()
-    }
-}
-
-impl AsSocketState for Listener {}
 
 fn push_and_wait<O: OpCode + 'static>(driver: &mut Proactor, op: O) -> BufResult<usize, O> {
     match driver.push(op) {
@@ -165,7 +153,7 @@ fn accept() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
 
-        let op = Accept::new(Listener(listener));
+        let op = Accept::new(listener);
         let (res, op) = push_and_wait(&mut driver, ForceBlocking(op)).unwrap();
         let (socket, _) = op.0.into_inner();
 
@@ -183,7 +171,7 @@ fn accept_multi() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
 
-        let op = AcceptMulti::new(Listener(listener));
+        let op = AcceptMulti::new(listener);
         let (res, op) = push_and_wait(&mut driver, ForceBlocking(op)).unwrap();
         let socket = op.0.into_inner();
 
