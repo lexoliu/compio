@@ -376,6 +376,33 @@ impl Runtime {
         self.driver.borrow_mut().unregister_files()
     }
 
+    /// Register buffers for operations on registered (fixed) buffers.
+    ///
+    /// This is only supported on io-uring driver, and will return an
+    /// [`Unsupported`] io error on all other drivers. See
+    /// [`Proactor::register_buffers`].
+    ///
+    /// # Safety
+    ///
+    /// See [`Proactor::register_buffers`].
+    ///
+    /// [`Unsupported`]: std::io::ErrorKind::Unsupported
+    /// [`Proactor::register_buffers`]: compio_driver::Proactor::register_buffers
+    pub unsafe fn register_buffers(&self, bufs: &[std::io::IoSliceMut<'_>]) -> io::Result<()> {
+        // SAFETY: the caller's guarantee.
+        unsafe { self.driver.borrow_mut().register_buffers(bufs) }
+    }
+
+    /// Unregister previously registered buffers.
+    ///
+    /// This is only supported on io-uring driver, and will return an
+    /// [`Unsupported`] io error on all other drivers.
+    ///
+    /// [`Unsupported`]: std::io::ErrorKind::Unsupported
+    pub fn unregister_buffers(&self) -> io::Result<()> {
+        self.driver.borrow_mut().unregister_buffers()
+    }
+
     /// Register the personality for the runtime.
     ///
     /// This is only supported on io-uring driver, and will return an
@@ -662,4 +689,41 @@ pub fn register_files(fds: &[RawFd]) -> io::Result<()> {
 /// [`Unsupported`]: std::io::ErrorKind::Unsupported
 pub fn unregister_files() -> io::Result<()> {
     Runtime::with_current(|r| r.unregister_files())
+}
+
+/// Register buffers for operations on registered (fixed) buffers with the
+/// current runtime's io_uring instance.
+///
+/// This only works on `io_uring` driver. It will return an [`Unsupported`]
+/// error on other drivers.
+///
+/// ## Panics
+///
+/// This method doesn't create runtime. It tries to obtain the current runtime
+/// by [`Runtime::with_current`].
+///
+/// # Safety
+///
+/// See [`Runtime::register_buffers`].
+///
+/// [`Unsupported`]: std::io::ErrorKind::Unsupported
+pub unsafe fn register_buffers(bufs: &[std::io::IoSliceMut<'_>]) -> io::Result<()> {
+    // SAFETY: the caller's guarantee.
+    Runtime::with_current(|r| unsafe { r.register_buffers(bufs) })
+}
+
+/// Unregister previously registered buffers from the current runtime's
+/// io_uring instance.
+///
+/// This only works on `io_uring` driver. It will return an [`Unsupported`]
+/// error on other drivers.
+///
+/// ## Panics
+///
+/// This method doesn't create runtime. It tries to obtain the current runtime
+/// by [`Runtime::with_current`].
+///
+/// [`Unsupported`]: std::io::ErrorKind::Unsupported
+pub fn unregister_buffers() -> io::Result<()> {
+    Runtime::with_current(|r| r.unregister_buffers())
 }
