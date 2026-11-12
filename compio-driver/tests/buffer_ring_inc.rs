@@ -6,6 +6,7 @@
 
 use std::{
     io::{self, Write},
+    net::Shutdown,
     num::NonZeroU16,
     os::unix::net::UnixStream,
 };
@@ -171,8 +172,14 @@ fn multishot_completions_keep_kernel_order() {
     assert_eq!(world.as_ptr(), hello.as_ptr().wrapping_add(hello.len()));
 
     drop((hello, world));
-    _ = s.driver.cancel(first);
-    _ = s.driver.cancel(second);
+    s.tx.shutdown(Shutdown::Write).unwrap();
+    other_tx.shutdown(Shutdown::Write).unwrap();
+    for mut key in [first, second] {
+        while let PushEntry::Pending(k) = s.driver.pop(key) {
+            key = k;
+            s.driver.poll(None).unwrap();
+        }
+    }
 }
 
 #[test]
