@@ -6,6 +6,7 @@
 
 use std::{
     io::{self, Write},
+    net::Shutdown,
     num::NonZeroU16,
     os::unix::net::UnixStream,
 };
@@ -13,7 +14,8 @@ use std::{
 use compio_buf::BufResult;
 use compio_driver::{
     AsRawFd, BufferPool, BufferRef, OpCode, Proactor, ProactorBuilder, PushEntry, ResultTakeBuffer,
-    SharedFd, op::RecvManaged,
+    SharedFd,
+    op::{RecvManaged, RecvMulti},
 };
 use io_uring::types::IOU_PBUF_RING_INC;
 use rustix::net::RecvFlags;
@@ -112,6 +114,60 @@ fn buffer_returns_once_the_kernel_is_done() {
     let next = s.recv().unwrap();
     assert_eq!(&*next, b"next");
     assert_eq!(next.as_ptr(), start);
+}
+
+/// Two multishot receives fill one buffer in the order the kernel posts their
+/// completions, and each completion keeps its own bytes whichever of them is
+/// taken first.
+#[test]
+fn multishot_completions_keep_kernel_order() {
+    let Some(mut s) = setup() else { return };
+    let (other_rx, mut other_tx) = UnixStream::pair().unwrap();
+    let other_rx = SharedFd::new(other_rx);
+    s.driver.attach(other_rx.as_raw_fd()).unwrap();
+
+    let first = RecvMulti::new(s.rx.clone(), &s.pool, 0, RecvFlags::empty()).unwrap();
+    let PushEntry::Pending(first) = s.driver.push(first) else {
+        panic!("a multishot receive completes asynchronously");
+    };
+    let second = RecvMulti::new(other_rx.clone(), &s.pool, 0, RecvFlags::empty()).unwrap();
+    let PushEntry::Pending(second) = s.driver.push(second) else {
+        panic!("a multishot receive completes asynchronously");
+    };
+
+    s.tx.write_all(b"hello").unwrap();
+    let mut hello = loop {
+        s.driver.poll(None).unwrap();
+        if let Some(res) = s.driver.pop_multishot(&first) {
+            break res;
+        }
+    };
+    other_tx.write_all(b"world").unwrap();
+    let mut world = loop {
+        s.driver.poll(None).unwrap();
+        if let Some(res) = s.driver.pop_multishot(&second) {
+            break res;
+        }
+    };
+
+    // Take the later completion first.
+    let world_len = *world.0.as_ref().unwrap();
+    let world = s.pool.take(&mut world.1, world_len).unwrap().unwrap();
+    let hello_len = *hello.0.as_ref().unwrap();
+    let hello = s.pool.take(&mut hello.1, hello_len).unwrap().unwrap();
+    assert_eq!(&*hello, b"hello");
+    assert_eq!(&*world, b"world");
+    assert_eq!(world.as_ptr(), hello.as_ptr().wrapping_add(hello.len()));
+
+    drop((hello, world));
+    s.tx.shutdown(Shutdown::Write).unwrap();
+    other_tx.shutdown(Shutdown::Write).unwrap();
+    for mut key in [first, second] {
+        while let PushEntry::Pending(k) = s.driver.pop(key) {
+            key = k;
+            s.driver.poll(None).unwrap();
+        }
+    }
 }
 
 #[test]

@@ -324,11 +324,21 @@ impl BufferPool {
     /// the pool once the kernel has finished with it and every reference into
     /// it is dropped.
     ///
+    /// A multishot op lends the buffer of each completion out when the driver
+    /// hands the completion to it, in the order the kernel posted them,
+    /// because on an incremental pool a completion's bytes follow those of the
+    /// completion before it in the same buffer, whichever op that was. `extra`
+    /// then carries that buffer, and this returns it.
+    ///
     /// Returns `None` if the buffer is not in the pool's ring (it was not
     /// reset back yet), or does not exist.
     ///
     /// [`is_incremental`]: Self::is_incremental
-    pub fn take(&self, extra: &Extra, len: usize) -> io::Result<Option<BufferRef>> {
+    pub fn take(&self, extra: &mut Extra, len: usize) -> io::Result<Option<BufferRef>> {
+        #[cfg(io_uring)]
+        if let Some(buffer) = extra.take_lent_buffer() {
+            return Ok(Some(buffer));
+        }
         self.take_filled(Filled::new(extra, len)?)
     }
 
@@ -342,12 +352,8 @@ impl BufferPool {
     /// has finished with it. Returns whether such a buffer was in the ring.
     ///
     /// This is the same as `take(extra, len)` and immediately drop it.
-    pub fn reset(&self, extra: &Extra, len: usize) -> io::Result<bool> {
-        self.reset_filled(Filled::new(extra, len)?)
-    }
-
-    pub(crate) fn reset_filled(&self, filled: Filled) -> io::Result<bool> {
-        Ok(self.take_filled(filled)?.is_some())
+    pub fn reset(&self, extra: &mut Extra, len: usize) -> io::Result<bool> {
+        Ok(self.take(extra, len)?.is_some())
     }
 
     /// Test if the pool consumes its buffers incrementally.

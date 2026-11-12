@@ -270,11 +270,11 @@ fn read_multi() {
 
     let op = ReadMulti::new(r, &pool, 0).unwrap();
     let buffer = push_and_wait_multi(&mut driver, op)
-        .try_fold(Vec::new(), |mut acc, BufResult(res, (extra, op))| {
+        .try_fold(Vec::new(), |mut acc, BufResult(res, (mut extra, op))| {
             let mut buf = if let Some(op) = op {
                 op.take_buffer()
             } else {
-                pool.take(&extra, *res.as_ref().unwrap_or(&0))?
+                pool.take(&mut extra, *res.as_ref().unwrap_or(&0))?
             };
             if let Some(ref mut buf) = buf {
                 unsafe { buf.advance_to(res?) }
@@ -318,11 +318,11 @@ fn recv_multi() {
     loop {
         let op = RecvMulti::new(stream.clone(), &pool, 0, RecvFlags::empty()).unwrap();
         let slice = push_and_wait_multi(&mut driver, op)
-            .try_fold(Vec::new(), |mut acc, BufResult(res, (extra, op))| {
+            .try_fold(Vec::new(), |mut acc, BufResult(res, (mut extra, op))| {
                 let mut buf = if let Some(op) = op {
                     op.take_buffer()
                 } else {
-                    pool.take(&extra, *res.as_ref().unwrap_or(&0))?
+                    pool.take(&mut extra, *res.as_ref().unwrap_or(&0))?
                 };
                 if let Some(ref mut buf) = buf {
                     unsafe { buf.advance_to(res?) }
