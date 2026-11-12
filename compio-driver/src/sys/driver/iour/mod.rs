@@ -169,6 +169,26 @@ impl Driver {
         Ok(())
     }
 
+    /// # Safety
+    ///
+    /// See [`Proactor::register_buffers`](crate::Proactor::register_buffers).
+    pub unsafe fn register_buffers(&self, bufs: &[std::io::IoSliceMut<'_>]) -> io::Result<()> {
+        // SAFETY: `IoSliceMut` is ABI-compatible with `iovec` on Unix; the
+        // caller keeps the memory valid while it is registered.
+        unsafe {
+            self.inner
+                .submitter()
+                .register_buffers(std::slice::from_raw_parts(
+                    bufs.as_ptr().cast::<libc::iovec>(),
+                    bufs.len(),
+                ))
+        }
+    }
+
+    pub fn unregister_buffers(&self) -> io::Result<()> {
+        self.inner.submitter().unregister_buffers()
+    }
+
     pub fn register_personality(&self) -> io::Result<u16> {
         self.inner.submitter().register_personality()
     }
