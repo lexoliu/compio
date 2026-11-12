@@ -398,6 +398,73 @@ impl Proactor {
         Err(unsupported())
     }
 
+    /// Register buffers for operations on registered (fixed) buffers, such as
+    /// `op::ReadFixedAt` and `op::SendZcFixed` (io-uring only), which name a
+    /// buffer by its index in `bufs`.
+    ///
+    /// The kernel pins the buffers' pages once, here, and charges them to
+    /// `RLIMIT_MEMLOCK` unless the process has `CAP_IPC_LOCK`; an operation on
+    /// a registered buffer then skips pinning them. A ring holds one table:
+    /// registering again before [`unregister_buffers`] fails with `EBUSY`.
+    ///
+    /// This only works on `io_uring` driver. It will return an [`Unsupported`]
+    /// error on other drivers.
+    ///
+    /// # Safety
+    ///
+    /// The memory `bufs` describes must stay valid, and be neither freed nor
+    /// remapped, until it is unregistered or the proactor is dropped: the
+    /// kernel reads it, and writes it through fixed reads, by its pinned
+    /// pages, whatever the address space then maps there.
+    ///
+    /// [`unregister_buffers`]: Proactor::unregister_buffers
+    /// [`Unsupported`]: std::io::ErrorKind::Unsupported
+    pub unsafe fn register_buffers(&self, bufs: &[std::io::IoSliceMut<'_>]) -> io::Result<()> {
+        fn unsupported(_: &[std::io::IoSliceMut<'_>]) -> io::Error {
+            io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Fixed-buffer registration is only supported on io-uring driver",
+            )
+        }
+
+        #[cfg(io_uring)]
+        match self.driver.as_iour() {
+            // SAFETY: the caller's guarantee.
+            Some(iour) => unsafe { iour.register_buffers(bufs) },
+            None => Err(unsupported(bufs)),
+        }
+
+        #[cfg(not(io_uring))]
+        Err(unsupported(bufs))
+    }
+
+    /// Unregister previously registered buffers.
+    ///
+    /// An operation still in flight keeps the pages it uses pinned until it
+    /// completes.
+    ///
+    /// This only works on `io_uring` driver. It will return an [`Unsupported`]
+    /// error on other drivers.
+    ///
+    /// [`Unsupported`]: std::io::ErrorKind::Unsupported
+    pub fn unregister_buffers(&self) -> io::Result<()> {
+        fn unsupported() -> io::Error {
+            io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Fixed-buffer unregistration is only supported on io-uring driver",
+            )
+        }
+
+        #[cfg(io_uring)]
+        match self.driver.as_iour() {
+            Some(iour) => iour.unregister_buffers(),
+            None => Err(unsupported()),
+        }
+
+        #[cfg(not(io_uring))]
+        Err(unsupported())
+    }
+
     /// Register a new personality in io-uring driver.
     ///
     /// Returns the personality id, which can be used with

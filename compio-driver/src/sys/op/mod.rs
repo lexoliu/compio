@@ -10,6 +10,11 @@ mod_use![
     asyncify, general, ext, flag, socket, fs, managed, multishot, zerocopy
 ];
 
+#[cfg(io_uring)]
+mod fixed;
+#[cfg(io_uring)]
+pub use fixed::*;
+
 cfg_select! {
     unix => {
         mod_use![unix];
