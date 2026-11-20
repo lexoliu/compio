@@ -16,7 +16,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 [dependencies]
 bumpalo = { version = "3.14.0", optional = true }
 arrayvec = { version = "0.7.4", optional = true }
-bytes = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true, default-features = false }
 smallvec = { workspace = true, optional = true }
 memmap2 = { version = "0.9.9", optional = true }
 
@@ -24,12 +24,19 @@ memmap2 = { version = "0.9.9", optional = true }
 libc = { workspace = true }
 
 [features]
+default = ["std"]
+## `std`: the `std::io` adapter types and `std::fs::File`-family impls. Off
+## for no_std, where `bytes`-family impls still apply.
+std = ["bytes?/std"]
+## `core::io` error types on no_std: nightly-only until `core_io_fundamentals`
+## stabilizes (rust-lang/rust#154046).
+core-io = []
 # Dependencies
 arrayvec = ["dep:arrayvec"]
 smallvec = ["dep:smallvec"]
 bumpalo = ["dep:bumpalo"]
 bytes = ["dep:bytes"]
-memmap2 = ["dep:memmap2"]
+memmap2 = ["std", "dep:memmap2"]
 
 # Nightly features
 allocator_api = []

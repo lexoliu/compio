@@ -1,4 +1,5 @@
-use std::{iter, mem::MaybeUninit};
+use alloc::vec::Vec;
+use core::{iter, mem::MaybeUninit};
 
 use crate::{IntoInner, IoBuf, IoBufMut, SetLen, VectoredSlice, t_alloc};
 
@@ -97,7 +98,7 @@ impl<T: IoBuf, const N: usize> IoVectoredBuf for [T; N] {
     }
 }
 
-impl<T: IoBuf, #[cfg(feature = "allocator_api")] A: std::alloc::Allocator + 'static> IoVectoredBuf
+impl<T: IoBuf, #[cfg(feature = "allocator_api")] A: core::alloc::Allocator + 'static> IoVectoredBuf
     for t_alloc!(Vec, T, A)
 {
     fn iter_slice(&self) -> impl Iterator<Item = &[u8]> {
@@ -124,19 +125,19 @@ where
 
 impl<T: IoBuf, Rest: IoVectoredBuf> IoVectoredBuf for (T, Rest) {
     fn iter_slice(&self) -> impl Iterator<Item = &[u8]> {
-        std::iter::once(self.0.as_init()).chain(self.1.iter_slice())
+        core::iter::once(self.0.as_init()).chain(self.1.iter_slice())
     }
 }
 
 impl<T: IoBuf> IoVectoredBuf for (T,) {
     fn iter_slice(&self) -> impl Iterator<Item = &[u8]> {
-        std::iter::once(self.0.as_init())
+        core::iter::once(self.0.as_init())
     }
 }
 
 impl IoVectoredBuf for () {
     fn iter_slice(&self) -> impl Iterator<Item = &[u8]> {
-        std::iter::empty()
+        core::iter::empty()
     }
 }
 
@@ -209,7 +210,7 @@ impl<T: IoBufMut, const N: usize> IoVectoredBufMut for [T; N] {
     }
 }
 
-impl<T: IoBufMut, #[cfg(feature = "allocator_api")] A: std::alloc::Allocator + 'static>
+impl<T: IoBufMut, #[cfg(feature = "allocator_api")] A: core::alloc::Allocator + 'static>
     IoVectoredBufMut for t_alloc!(Vec, T, A)
 {
     fn iter_uninit_slice(&mut self) -> impl Iterator<Item = &mut [MaybeUninit<u8>]> {
@@ -255,7 +256,7 @@ impl IoVectoredBufMut for () {
 
 impl<T: IoBufMut, Rest: IoVectoredBufMut> SetLen for (T, Rest) {
     unsafe fn set_len(&mut self, len: usize) {
-        let head_len = std::cmp::min(len, self.0.buf_capacity());
+        let head_len = core::cmp::min(len, self.0.buf_capacity());
         let rest_len = len - head_len;
 
         // SAFETY: head_len <= self.0.buf_capacity()

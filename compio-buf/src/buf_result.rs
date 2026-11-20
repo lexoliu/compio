@@ -1,9 +1,14 @@
 #[cfg(feature = "try_trait_v2")]
-use std::{
+use core::{
     convert::Infallible,
     ops::{ControlFlow, FromResidual, Residual, Try},
 };
-use std::{fmt::Debug, io};
+use core::fmt::Debug;
+
+#[cfg(feature = "std")]
+use std::io;
+#[cfg(not(feature = "std"))]
+use core::io;
 
 use crate::IntoInner;
 

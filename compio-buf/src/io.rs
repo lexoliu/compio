@@ -1,6 +1,11 @@
-use std::{io, marker::PhantomData};
+use core::marker::PhantomData;
 
-use crate::{IntoInner, IoBuf, IoBufMut, Slice};
+#[cfg(feature = "std")]
+use std::io;
+
+use crate::{IntoInner, IoBuf, Slice};
+#[cfg(feature = "std")]
+use crate::IoBufMut;
 
 /// Adapts an [`IoBuf`] to implement the [`std::io::Read`] trait.
 ///
@@ -44,6 +49,7 @@ impl<B: IoBuf> Reader<B> {
     }
 }
 
+#[cfg(feature = "std")]
 impl<B: IoBuf> io::Read for Reader<B> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let n = self.as_remaining().read(buf)?;
@@ -63,7 +69,7 @@ impl<B> IntoInner for Reader<B> {
 /// Adapts a reference to [`IoBuf`] to [`std::io::Read`] trait.
 ///
 /// This can be constructed with [`IoBuf::as_reader`].
-pub struct ReaderRef<'a, B: ?Sized>(&'a [u8], PhantomData<&'a B>);
+pub struct ReaderRef<'a, B: ?Sized>(#[allow(dead_code)] &'a [u8], PhantomData<&'a B>);
 
 impl<'a, B: ?Sized> ReaderRef<'a, B> {
     /// Creates a new [`ReaderRef`] from the given buffer reference.
@@ -75,6 +81,7 @@ impl<'a, B: ?Sized> ReaderRef<'a, B> {
     }
 }
 
+#[cfg(feature = "std")]
 impl<B: IoBuf> io::Read for ReaderRef<'_, B> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         // implementation of Read for &[u8] will update the reference to point after
@@ -105,6 +112,7 @@ impl<B> Writer<B> {
     }
 }
 
+#[cfg(feature = "std")]
 impl<B: IoBufMut> io::Write for Writer<B> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match self.0.extend_from_slice(buf) {
@@ -148,6 +156,7 @@ impl<'a, B: ?Sized> WriterRef<'a, B> {
     }
 }
 
+#[cfg(feature = "std")]
 impl<B: IoBufMut + ?Sized> io::Write for WriterRef<'_, B> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.0.extend_from_slice(buf)?;
@@ -159,7 +168,7 @@ impl<B: IoBufMut + ?Sized> io::Write for WriterRef<'_, B> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use std::io::{Read, Write};
 

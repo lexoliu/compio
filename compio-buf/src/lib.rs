@@ -4,6 +4,8 @@
 //! crate defines [`IoBuf`] and [`IoBufMut`] traits which are implemented by
 //! buffer types that respect the safety contract.
 
+#![cfg_attr(not(feature = "std"), no_std)]
+#![cfg_attr(all(not(feature = "std"), feature = "core-io"), feature(core_io))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(feature = "allocator_api", feature(allocator_api))]
 #![cfg_attr(feature = "read_buf", feature(read_buf, core_io_borrowed_buf))]
@@ -17,6 +19,17 @@
 #![doc(
     html_favicon_url = "https://github.com/compio-rs/compio-logo/raw/refs/heads/master/generated/colored-bold.svg"
 )]
+
+#[cfg(all(not(feature = "std"), not(feature = "core-io")))]
+compile_error!(
+    "`compio-buf` without `std` needs `core-io` for `core::io` (nightly-only \
+     until `core_io_fundamentals` stabilizes)"
+);
+
+extern crate alloc;
+
+#[cfg(test)]
+extern crate std;
 
 #[cfg(feature = "arrayvec")]
 pub use arrayvec;

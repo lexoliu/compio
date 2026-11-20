@@ -1,4 +1,4 @@
-use std::{
+use core::{
     mem::MaybeUninit,
     ops::{Deref, DerefMut},
 };
@@ -137,7 +137,7 @@ impl<T: IoBuf> Slice<T> {
     }
 
     /// Range of initialized bytes in the slice.
-    fn initialized_range(&self) -> std::ops::Range<usize> {
+    fn initialized_range(&self) -> core::ops::Range<usize> {
         let end = self.end_or_len();
         self.begin..end
     }
@@ -152,7 +152,7 @@ impl<T: IoBufMut> Slice<T> {
     }
 
     /// Full range of the slice, include uninitialized bytes.
-    fn range(&mut self) -> std::ops::Range<usize> {
+    fn range(&mut self) -> core::ops::Range<usize> {
         let end = self.end_or_cap();
         self.begin..end
     }

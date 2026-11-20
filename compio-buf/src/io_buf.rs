@@ -1,6 +1,15 @@
 #[cfg(feature = "allocator_api")]
-use std::alloc::Allocator;
-use std::{error::Error, fmt::Display, mem::MaybeUninit, ops::RangeBounds, rc::Rc, sync::Arc};
+use core::alloc::Allocator;
+use alloc::{boxed::Box, format, rc::Rc, string::String, vec::Vec};
+
+#[cfg(target_has_atomic = "ptr")]
+use alloc::sync::Arc;
+use core::{error::Error, fmt::Display, mem::MaybeUninit, ops::RangeBounds};
+
+#[cfg(feature = "std")]
+use std::io;
+#[cfg(not(feature = "std"))]
+use core::io;
 
 use crate::*;
 
@@ -46,11 +55,11 @@ pub trait IoBuf: 'static {
     /// Panics if:
     /// * begin > buf_len()
     /// * end < begin
-    fn slice(self, range: impl std::ops::RangeBounds<usize>) -> Slice<Self>
+    fn slice(self, range: impl core::ops::RangeBounds<usize>) -> Slice<Self>
     where
         Self: Sized,
     {
-        use std::ops::Bound;
+        use core::ops::Bound;
 
         let begin = match range.start_bound() {
             Bound::Included(&n) => n,
@@ -148,6 +157,7 @@ impl IoBuf for String {
     }
 }
 
+#[cfg(target_has_atomic = "ptr")]
 impl<B: IoBuf + ?Sized, #[cfg(feature = "allocator_api")] A: Allocator + 'static> IoBuf
     for t_alloc!(Arc, B, A)
 {
@@ -171,6 +181,7 @@ impl IoBuf for bytes::BytesMut {
 }
 
 #[cfg(feature = "read_buf")]
+#[cfg(feature = "std")]
 impl IoBuf for std::io::BorrowedBuf<'static, u8> {
     fn as_init(&self) -> &[u8] {
         self.filled()
@@ -231,7 +242,7 @@ impl ReserveError {
 }
 
 impl Display for ReserveError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             ReserveError::NotSupported => write!(f, "reservation is not supported"),
             ReserveError::ReserveFailed(src) => write!(f, "reservation failed: {src}"),
@@ -248,14 +259,14 @@ impl Error for ReserveError {
     }
 }
 
-impl From<ReserveError> for std::io::Error {
+impl From<ReserveError> for io::Error {
     fn from(value: ReserveError) -> Self {
         match value {
             ReserveError::NotSupported => {
-                std::io::Error::new(std::io::ErrorKind::Unsupported, "reservation not supported")
+                io::Error::new(io::ErrorKind::Unsupported, "reservation not supported")
             }
             ReserveError::ReserveFailed(src) => {
-                std::io::Error::new(std::io::ErrorKind::OutOfMemory, src)
+                io::Error::new(io::ErrorKind::OutOfMemory, src)
             }
         }
     }
@@ -293,7 +304,7 @@ impl ReserveExactError {
 }
 
 impl Display for ReserveExactError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             ReserveExactError::NotSupported => write!(f, "reservation is not supported"),
             ReserveExactError::ReserveFailed(src) => write!(f, "reservation failed: {src}"),
@@ -326,16 +337,16 @@ impl Error for ReserveExactError {
     }
 }
 
-impl From<ReserveExactError> for std::io::Error {
+impl From<ReserveExactError> for io::Error {
     fn from(value: ReserveExactError) -> Self {
         match value {
             ReserveExactError::NotSupported => {
-                std::io::Error::new(std::io::ErrorKind::Unsupported, "reservation not supported")
+                io::Error::new(io::ErrorKind::Unsupported, "reservation not supported")
             }
             ReserveExactError::ReserveFailed(src) => {
-                std::io::Error::new(std::io::ErrorKind::OutOfMemory, src)
+                io::Error::new(io::ErrorKind::OutOfMemory, src)
             }
-            ReserveExactError::ExactSizeMismatch { expected, reserved } => std::io::Error::other(
+            ReserveExactError::ExactSizeMismatch { expected, reserved } => io::Error::other(
                 format!("reserved size mismatch: expected {expected}, reserved {reserved}",),
             ),
         }
@@ -344,7 +355,7 @@ impl From<ReserveExactError> for std::io::Error {
 
 #[cfg(feature = "smallvec")]
 mod smallvec_err {
-    use std::{error::Error, fmt::Display};
+    use core::{error::Error, fmt::Display};
 
     use smallvec::CollectionAllocErr;
 
@@ -352,7 +363,7 @@ mod smallvec_err {
     pub(super) struct SmallVecErr(pub CollectionAllocErr);
 
     impl Display for SmallVecErr {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
             write!(f, "SmallVec allocation error: {}", self.0)
         }
     }
@@ -403,7 +414,7 @@ pub trait IoBufMut: IoBuf + SetLen {
         // - lifetime of the returned slice is bounded by &mut self
         // - bytes within `len` are guaranteed to be initialized
         // - the pointer is derived from
-        unsafe { std::slice::from_raw_parts_mut(ptr as *mut u8, len) }
+        unsafe { core::slice::from_raw_parts_mut(ptr as *mut u8, len) }
     }
 
     /// Extend the buffer by copying bytes from `src`.
@@ -426,7 +437,7 @@ pub trait IoBufMut: IoBuf + SetLen {
             // - src is valid for len bytes
             // - ptr is valid for len bytes
             // - &mut self guarantees that src cannot overlap with dst
-            std::ptr::copy_nonoverlapping(src.as_ptr() as _, ptr, len);
+            core::ptr::copy_nonoverlapping(src.as_ptr() as _, ptr, len);
 
             // SAFETY: the bytes in range [init, init + len) are initialized now
             self.advance_to(init + len);
@@ -572,7 +583,7 @@ impl<#[cfg(feature = "allocator_api")] A: Allocator + 'static> IoBufMut for t_al
         let ptr = self.as_mut_ptr() as *mut MaybeUninit<u8>;
         let cap = self.capacity();
         // SAFETY: Vec guarantees that the pointer is valid for `capacity` bytes
-        unsafe { std::slice::from_raw_parts_mut(ptr, cap) }
+        unsafe { core::slice::from_raw_parts_mut(ptr, cap) }
     }
 
     fn reserve(&mut self, len: usize) -> Result<(), ReserveError> {
@@ -607,7 +618,7 @@ impl IoBufMut for [u8] {
         let ptr = self.as_mut_ptr() as *mut MaybeUninit<u8>;
         let len = self.len();
         // SAFETY: slice is fully initialized, so treating it as MaybeUninit is safe
-        unsafe { std::slice::from_raw_parts_mut(ptr, len) }
+        unsafe { core::slice::from_raw_parts_mut(ptr, len) }
     }
 }
 
@@ -615,7 +626,7 @@ impl<const N: usize> IoBufMut for [u8; N] {
     fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
         let ptr = self.as_mut_ptr() as *mut MaybeUninit<u8>;
         // SAFETY: array is fully initialized, so treating it as MaybeUninit is safe
-        unsafe { std::slice::from_raw_parts_mut(ptr, N) }
+        unsafe { core::slice::from_raw_parts_mut(ptr, N) }
     }
 }
 
@@ -625,7 +636,7 @@ impl IoBufMut for bytes::BytesMut {
         let ptr = self.as_mut_ptr() as *mut MaybeUninit<u8>;
         let cap = self.capacity();
         // SAFETY: BytesMut guarantees that the pointer is valid for `capacity` bytes
-        unsafe { std::slice::from_raw_parts_mut(ptr, cap) }
+        unsafe { core::slice::from_raw_parts_mut(ptr, cap) }
     }
 
     fn reserve(&mut self, len: usize) -> Result<(), ReserveError> {
@@ -652,6 +663,7 @@ impl IoBufMut for bytes::BytesMut {
 }
 
 #[cfg(feature = "read_buf")]
+#[cfg(feature = "std")]
 impl IoBufMut for std::io::BorrowedBuf<'static, u8> {
     fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
         let total_cap = self.capacity();
@@ -660,7 +672,7 @@ impl IoBufMut for std::io::BorrowedBuf<'static, u8> {
         // BorrowedBuf guarantees that the underlying buffer has capacity bytes.
         unsafe {
             let filled_ptr = self.filled().as_ptr() as *mut MaybeUninit<u8>;
-            std::slice::from_raw_parts_mut(filled_ptr, total_cap)
+            core::slice::from_raw_parts_mut(filled_ptr, total_cap)
         }
     }
 }
@@ -670,7 +682,7 @@ impl<const N: usize> IoBufMut for arrayvec::ArrayVec<u8, N> {
     fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
         let ptr = self.as_mut_ptr() as *mut MaybeUninit<u8>;
         // SAFETY: ArrayVec guarantees that the pointer is valid for N bytes
-        unsafe { std::slice::from_raw_parts_mut(ptr, N) }
+        unsafe { core::slice::from_raw_parts_mut(ptr, N) }
     }
 }
 
@@ -683,7 +695,7 @@ where
         let ptr = self.as_mut_ptr() as *mut MaybeUninit<u8>;
         let cap = self.capacity();
         // SAFETY: SmallVec guarantees that the pointer is valid for `capacity` bytes
-        unsafe { std::slice::from_raw_parts_mut(ptr, cap) }
+        unsafe { core::slice::from_raw_parts_mut(ptr, cap) }
     }
 
     fn reserve(&mut self, len: usize) -> Result<(), ReserveError> {
@@ -720,7 +732,7 @@ where
 impl IoBufMut for memmap2::MmapMut {
     fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
         // Safety: &mut [u8] is valid &mut [MaybeUninit<u8>]
-        unsafe { std::mem::transmute(self.as_mut()) }
+        unsafe { core::mem::transmute(self.as_mut()) }
     }
 }
 
@@ -834,6 +846,7 @@ impl SetLen for bytes::BytesMut {
 }
 
 #[cfg(feature = "read_buf")]
+#[cfg(feature = "std")]
 impl SetLen for std::io::BorrowedBuf<'static, u8> {
     unsafe fn set_len(&mut self, len: usize) {
         debug_assert!(self.capacity() >= len);
